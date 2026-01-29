@@ -1,5 +1,5 @@
 import User from "../models/User.js";
-import bcrypt from "bcryptjs"; 
+import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
 // Sign Up: Hash password before saving
@@ -24,14 +24,16 @@ export const createUser = async (req, res) => {
     });
 
     const savedUser = await newUser.save();
-    
+
     // Don't send the password back in the response
     res.status(201).json({
       message: "User created successfully",
-      user: { id: savedUser._id, email: savedUser.email }
+      user: { id: savedUser._id, email: savedUser.email },
     });
   } catch (error) {
-    res.status(500).json({ message: "Error creating user", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error creating user", error: error.message });
   }
 };
 
@@ -48,46 +50,51 @@ export const verifyUser = async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
 
     if (isMatch) {
-
-      const token = jwt.sign(
-        { id: user._id }, 
-        process.env.JWT_SECRET,
-        { expiresIn: "1d" }     
-      );
+      const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+        expiresIn: "1d",
+      });
 
       // 3. Send the token back to the frontend
-      res.json({ 
-        message: "Login successful", 
-        token, // <--- The frontend needs this!
-        user: { id: user._id, email: user.email } 
+      res.json({
+        message: "Login successful",
+        token,
+        user: { id: user._id, email: user.email },
       });
     } else {
       res.status(401).json({ message: "Invalid email or password" });
     }
   } catch (error) {
-    res.status(500).json({ message: "Server error during login", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Server error during login", error: error.message });
   }
 };
 
 export const updateUser = async (req, res) => {
   try {
     const updatedUser = await User.findByIdAndUpdate(req.params.id, req.body, {
-      new: true, // Returns the document AFTER update
+      new: true,
     });
-    if (!updatedUser) return res.status(404).json({ message: "User not found" });
+    if (!updatedUser)
+      return res.status(404).json({ message: "User not found" });
     res.json(updatedUser);
   } catch (error) {
-    res.status(400).json({ message: "Error updating user", error: error.message });
+    res
+      .status(400)
+      .json({ message: "Error updating user", error: error.message });
   }
 };
 
 export const deleteUser = async (req, res) => {
   try {
     const deletedUser = await User.findByIdAndDelete(req.params.id);
-    if (!deletedUser) return res.status(404).json({ message: "User not found" });
+    if (!deletedUser)
+      return res.status(404).json({ message: "User not found" });
     res.json({ message: "Deleted successfully" });
   } catch (error) {
-    res.status(500).json({ message: "Error deleting user", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error deleting user", error: error.message });
   }
 };
 
@@ -96,6 +103,8 @@ export const getAllUsers = async (req, res) => {
     const users = await User.find();
     res.json(users);
   } catch (error) {
-    res.status(500).json({ message: "Error fetching users", error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error fetching users", error: error.message });
   }
 };
