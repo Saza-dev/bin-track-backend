@@ -1,8 +1,107 @@
 import Waste from "../models/Waste.js";
 import Composte from "../models/Composte.js";
+import CompostProcess from "../models/ComposteProcess.js";
+import CompostSale from "../models/ComposteSale.js";
 import PDFDocument from "pdfkit";
 
-// Helper to build filter object for MongoDB
+export const getSummary = async (req, res) => {
+  try {
+    const { startDate, endDate, type, location } = req.query;
+
+    // 1. Build Date Filter (Robust Range)
+    const dateQuery = {};
+    if (startDate) dateQuery.$gte = new Date(startDate);
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      dateQuery.$lte = end;
+    }
+
+    // 2. Build Model-Specific Filters
+    const filterWithLocation = {};
+    if (Object.keys(dateQuery).length > 0) filterWithLocation.date = dateQuery;
+    if (location && location !== "all") filterWithLocation.location = location;
+
+    // Processing & Sales models don't have 'location', so we only filter them by date
+    const filterByDateOnly = {};
+    if (Object.keys(dateQuery).length > 0) filterByDateOnly.date = dateQuery;
+
+    const totals = {
+      food: 0,
+      garden: 0,
+      paper: 0,
+      polyethene: 0,
+      eWaste: 0,
+      medical: 0,
+      harvestedCompost: 0,
+      totalIncome: 0,
+    };
+
+    const queries = [];
+
+    // General Waste Collection
+    if (type === "all" || type === "waste") {
+      queries.push(
+        Waste.find(filterWithLocation).then((logs) => {
+          logs.forEach((entry) => {
+            const w = entry.weights || {};
+            totals.food += w.food?.weight || 0;
+            totals.paper += w.papper?.weight || 0; // Using schema typo 'papper'
+            totals.polyethene += w.polyethene?.weight || 0;
+            totals.eWaste += w.eWaste?.weight || 0;
+            totals.medical += w.medicalWaste?.weight || 0;
+          });
+        }),
+      );
+    }
+
+    // Compost Collection
+    if (type === "all" || type === "composte") {
+      queries.push(
+        Composte.find(filterWithLocation).then((logs) => {
+          logs.forEach((entry) => {
+            const cat = (entry.wasteType || "").toLowerCase();
+            const weight = entry.weight || 0;
+            if (cat.includes("food")) totals.food += weight;
+            else if (cat.includes("garden")) totals.garden += weight;
+          });
+        }),
+      );
+    }
+
+    // Processing (Note: uses 'startDate' instead of 'date')
+    if (type === "all" || type === "composte") {
+      const procDateFilter = {};
+      if (startDate) procDateFilter.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        procDateFilter.$lte = end;
+      }
+
+      queries.push(
+        CompostProcess.find({ startDate: procDateFilter }).then((procs) => {
+          procs.forEach((p) => (totals.harvestedCompost += p.finalWeight || 0));
+        }),
+      );
+    }
+
+    // Sales (Note: CompostSale doesn't have location in the provided schema)
+    if (type === "all" || type === "sales") {
+      queries.push(
+        CompostSale.find(filterByDateOnly).then((sales) => {
+          sales.forEach((s) => (totals.totalIncome += s.actualIncome || 0));
+        }),
+      );
+    }
+
+    await Promise.all(queries);
+    res.json({ success: true, totals });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 const buildFilter = (startDate, endDate, location) => {
   let filter = {};
   if (startDate || endDate) {
@@ -14,183 +113,130 @@ const buildFilter = (startDate, endDate, location) => {
       filter.date.$lte = end;
     }
   }
-  // Apply location filter if it's not "all"
   if (location && location !== "all") {
     filter.location = location;
   }
   return filter;
 };
 
-export const getSummary = async (req, res) => {
-  try {
-    const { startDate, endDate, type, location } = req.query;
-    const filter = buildFilter(startDate, endDate, location); // Use the helper
-
-    let wasteData = [];
-    let compostData = [];
-
-    if (type === "waste") {
-      wasteData = await Waste.find(filter);
-    } else if (type === "composte") {
-      compostData = await Composte.find(filter);
-    } else {
-      [wasteData, compostData] = await Promise.all([
-        Waste.find(filter),
-        Composte.find(filter),
-      ]);
-    }
-
-    const totals = { food: 0, paper: 0, polyethene: 0, eWaste: 0, medical: 0 };
-
-    wasteData.forEach((entry) => {
-      // Accessing nested 'weights' object
-      const w = entry.weights || {};
-      totals.food += w.food || 0;
-      totals.paper += w.papper || 0;
-      totals.polyethene += w.polyethene || 0;
-      totals.eWaste += w.eWaste || 0;
-      totals.medical += w.medicalWaste || 0;
-    });
-
-    compostData.forEach((entry) => {
-      const category = entry.wasteType?.toLowerCase();
-      if (category === "food") totals.food += entry.weight || 0;
-      if (category === "paper") totals.paper += entry.weight || 0;
-      if (category === "polyethene") totals.polyethene += entry.weight || 0;
-      if (category === "e-waste") totals.eWaste += entry.weight || 0;
-      if (category === "medical waste") totals.medical += entry.weight || 0;
-    });
-
-    res.json({ success: true, totals });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-};
-
 export const downloadReport = async (req, res) => {
   try {
-    const { type, startDate, endDate, location } = req.query;
+    const { startDate, endDate, location } = req.query;
     const filter = buildFilter(startDate, endDate, location);
 
-    let wasteLogs = [];
-    let compostLogs = [];
+    // 1. Fetch data safely with .lean()
+    const [waste, compost, sales] = await Promise.all([
+      Waste.find(filter).sort({ date: -1 }).lean(),
+      Composte.find(filter).sort({ date: -1 }).lean(),
+      CompostSale.find(filter).sort({ date: -1 }).lean(),
+    ]);
 
-    // Logic for distinct data fetching
-    if (type === "waste") {
-      wasteLogs = await Waste.find(filter).sort({ date: -1 });
-    } else if (type === "composte") {
-      compostLogs = await Composte.find(filter).sort({ date: -1 });
-    } else {
-      // Fetch both for "all"
-      [wasteLogs, compostLogs] = await Promise.all([
-        Waste.find(filter).sort({ date: -1 }),
-        Composte.find(filter).sort({ date: -1 }),
-      ]);
-    }
+    // 2. Setup PDF Stream
+    const doc = new PDFDocument({ margin: 40 });
+    const buffers = [];
+    doc.on("data", (chunk) => buffers.push(chunk));
 
-    const doc = new PDFDocument({ margin: 50 });
-    res.setHeader(
-      "Content-disposition",
-      `attachment; filename="Waste_Report_${Date.now()}.pdf"`,
-    );
-    res.setHeader("Content-type", "application/pdf");
-    doc.pipe(res);
+    doc.on("end", () => {
+      const pdfData = Buffer.concat(buffers);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${Date.now()}.pdf"`,
+      );
+      res.status(200).send(pdfData);
+    });
 
-    // --- PDF HEADER ---
-    doc
-      .fillColor("#065f46")
-      .fontSize(24)
-      .text("Waste Analytics Summary", { align: "center" });
-    doc
-      .fontSize(10)
-      .fillColor("#6b7280")
-      .text(`Generated: ${new Date().toLocaleString()}`, { align: "center" });
-    if (startDate && endDate) {
-      doc.text(`Reporting Period: ${startDate} to ${endDate}`, {
-        align: "center",
-      });
-    }
-    doc.moveDown(2);
+    // --- PDF CONTENT GENERATION ---
+    // Header
+    doc.rect(0, 0, 612, 60).fill("#10b981");
+    doc.fillColor("#ffffff").fontSize(18).text("Environmental Report", 40, 22);
+    doc.moveDown(3);
 
-    if (location && location !== "all") {
+    // Section: General Waste
+    if (waste.length > 0) {
       doc
-        .fontSize(10)
-        .fillColor("#6b7280")
-        .text(`Location Filter: ${location}`, { align: "center" });
-      doc.moveDown(1);
-    }
-
-    if (wasteLogs.length > 0) {
-      doc
-        .fontSize(14)
-        .fillColor("#065f46")
-        .text("Waste Logs", { align: "center" });
-      doc.moveDown(1);
-
-      wasteLogs.forEach((item, i) => {
+        .fillColor("#10b981")
+        .fontSize(12)
+        .text("1. GENERAL WASTE COLLECTION")
+        .moveDown(0.5);
+      waste.forEach((item) => {
         const dateStr = item.date
-          ? item.date.toISOString().split("T")[0]
+          ? new Date(item.date).toLocaleDateString()
           : "N/A";
-        doc
-          .fontSize(10)
-          .fillColor("#1f2937")
-          .text(`${i + 1}. [${dateStr}] - Location: ${item.location}`);
-
         const w = item.weights || {};
 
-        const food = w.food || 0;
-        const paper = w.papper || 0;
-        const medical = w.medicalWaste || 0;
-        const poly = w.polyethene || 0;
-        const ewaste = w.eWaste || 0;
-
         doc
+          .fillColor("#1e293b")
           .fontSize(9)
-          .fillColor("#4b5563")
           .text(
-            `   Weights: Food: ${food}kg | Paper: ${paper}kg | Medical: ${medical}kg | Poly: ${poly}kg | E-Waste: ${ewaste}kg`,
+            `[${dateStr}] ${item.location} | Collector: ${item.collectorName || "N/A"}`,
           );
-        doc.moveDown(0.5);
+        // Note: Using 'papper' to match your schema typo
+        doc
+          .fillColor("#64748b")
+          .text(
+            `   Food: ${w.food?.weight || 0}kg | Paper: ${w.papper?.weight || 0}kg | Poly: ${w.polyethene?.weight || 0}kg`,
+          )
+          .moveDown(0.4);
       });
-      doc.moveDown(1.5);
+      doc.moveDown();
     }
 
-    if (compostLogs.length > 0) {
+    // Section: Organic Compost
+    if (compost.length > 0) {
       doc
-        .fontSize(14)
-        .fillColor("#065f46")
-        .text("Compost Logs", { align: "center" });
-      doc.moveDown(1);
-      compostLogs.forEach((item, i) => {
-        const dateStr = item.date
-          ? item.date.toISOString().split("T")[0]
-          : "N/A";
-        doc
-          .fontSize(10)
-          .fillColor("#1f2937")
-          .text(`${i + 1}. [${dateStr}] - Location: ${item.location}`);
-
-        const wasteType = item.wasteType || "General";
-        const weight = item.weight || 0;
-
-        doc
-          .fontSize(9)
-          .fillColor("#4b5563")
-          .text(`   Entry Type: ${wasteType} | Recorded Weight: ${weight}kg`);
-        doc.moveDown(0.5);
-      });
-    }
-
-    if (wasteLogs.length === 0 && compostLogs.length === 0) {
-      doc
+        .fillColor("#059669")
         .fontSize(12)
-        .fillColor("#ef4444")
-        .text("No data found for the selected dates.", { align: "center" });
+        .text("2. ORGANIC COMPOST COLLECTION")
+        .moveDown(0.5);
+      compost.forEach((c) => {
+        const dateStr = c.date ? new Date(c.date).toLocaleDateString() : "N/A";
+        doc
+          .fillColor("#1e293b")
+          .fontSize(9)
+          .text(
+            `[${dateStr}] ${c.location} | ${c.wasteType} | Coll by: ${c.collectingPerson || "N/A"}`,
+          );
+        doc
+          .fillColor("#64748b")
+          .text(`   Weight: ${c.weight || 0}kg`)
+          .moveDown(0.4);
+      });
+      doc.moveDown();
+    }
+
+    // Section: Sales & Revenue
+    if (sales.length > 0) {
+      doc
+        .fillColor("#2563eb")
+        .fontSize(12)
+        .text("3. COMPOST SALES & REVENUE")
+        .moveDown(0.5);
+      sales.forEach((s) => {
+        const dateStr = s.date ? new Date(s.date).toLocaleDateString() : "N/A";
+        doc
+          .fillColor("#1e293b")
+          .fontSize(9)
+          .text(
+            `[${dateStr}] Released by: ${s.releasedPerson || "N/A"} | Vehicle: ${s.vehicleNumber}`,
+          );
+        doc
+          .fillColor("#2563eb")
+          .text(
+            `   Income: LKR ${s.actualIncome?.toLocaleString() || 0} (Weight: ${s.weight || 0}kg)`,
+          )
+          .moveDown(0.4);
+      });
     }
 
     doc.end();
   } catch (error) {
-    console.error("PDF Error:", error);
-    res.status(500).send("PDF Generation Failed");
+    console.error("PDF Export Error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: "Internal Server Error during PDF generation",
+      });
+    }
   }
 };

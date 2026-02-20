@@ -4,7 +4,6 @@ import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-router.post("/add-composte", protect, composteController.addComposteEntry);
-
+router.post("/add", protect, composteController.addCompostSale);
 
 export default router;
